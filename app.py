@@ -40,19 +40,19 @@ AUTH_CREDENTIALS = {
         },
         "deepak_sir": {
             "name": "Deepak Sir",
-            "password": "deepak_sir",
+            "password": "$2b$12$dM9Ow7L7QIRg.nXTuhZyZuQ4V.Lna0eYxDGwhZgtH1aBVBKFTSIwC",
         },
         "suresh_sir": {
             "name": "Suresh Sir",
-            "password": "suresh_sir",
+            "password": "$2b$12$JqU61Q9ZSmuT7A7IFzgYLucKLOS7PMTJG6LI3jj9l1MNYmpaRAKhy",
         },
         "siddhart_sir": {
             "name": "Siddhart Sir",
-            "password": "siddhart_sir",
+            "password": "$2b$12$SGy81hSEXObTdF7vcueTu.kkwtKCQTUa4jBzG8Agcs78RnvuoFbvG",
         },
         "aaras_sir": {
             "name": "Aras Sir",
-            "password": "aras_sir",
+            "password": "$2b$12$b4s1cZdMVXnODNxVDjU6Gu1MQeR8SfYyKPIX47/ofAIXuW7R.nmNy",
         },
     }
 }
