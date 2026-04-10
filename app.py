@@ -18,6 +18,13 @@ from datetime import datetime
 import glob
 import streamlit_authenticator as stauth
 
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except ImportError:
+    gspread = None
+    Credentials = None
+
 load_dotenv()
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -344,6 +351,77 @@ def save_history_to_disk(history):
     except Exception:
         pass
 
+GOOGLE_SHEETS_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+ACTIVITY_LOG_HEADERS = [
+    "timestamp",
+    "username",
+    "name",
+    "action",
+    "topic",
+    "layout",
+    "details",
+]
+
+def _load_google_sheet_config():
+    sheet_config = st.secrets.get("google_sheets", {})
+    service_account_info = st.secrets.get("gcp_service_account", {})
+
+    if not service_account_info:
+        raw_creds = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+        if raw_creds:
+            try:
+                service_account_info = json.loads(raw_creds)
+            except json.JSONDecodeError:
+                service_account_info = {}
+
+    spreadsheet_id = sheet_config.get("spreadsheet_id") or os.getenv("GOOGLE_SHEET_ID", "")
+    worksheet_name = sheet_config.get("worksheet", "activity_logs") or "activity_logs"
+    return service_account_info, spreadsheet_id, worksheet_name
+
+@st.cache_resource(show_spinner=False)
+def get_google_activity_sheet():
+    if gspread is None or Credentials is None:
+        return None
+
+    service_account_info, spreadsheet_id, worksheet_name = _load_google_sheet_config()
+    if not service_account_info or not spreadsheet_id:
+        return None
+
+    try:
+        creds = Credentials.from_service_account_info(
+            dict(service_account_info),
+            scopes=GOOGLE_SHEETS_SCOPES,
+        )
+        client = gspread.authorize(creds)
+        workbook = client.open_by_key(spreadsheet_id)
+        try:
+            worksheet = workbook.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            worksheet = workbook.add_worksheet(title=worksheet_name, rows=1000, cols=20)
+
+        if worksheet.row_values(1) != ACTIVITY_LOG_HEADERS:
+            worksheet.update("A1:G1", [ACTIVITY_LOG_HEADERS])
+        return worksheet
+    except Exception:
+        return None
+
+def append_google_sheet_activity(timestamp, username, name, action, topic, layout, details):
+    worksheet = get_google_activity_sheet()
+    if worksheet is None:
+        return False
+
+    try:
+        worksheet.append_row(
+            [timestamp, username, name, action, topic, layout, details],
+            value_input_option="USER_ENTERED",
+        )
+        return True
+    except Exception:
+        return False
+
 DEFAULTS = {
     "groq_key": os.getenv("GROQ_API_KEY", ""),
     "fal_key":  os.getenv("FAL_API_KEY",  ""),
@@ -465,7 +543,7 @@ def get_next_serial():
         return 1
     numbers = []
     for f in existing_files:
-        match = re.search(r'prompt_(\d+)\.txt', f)
+        match = re.search(r'prompt_(\d+)(?:_.*)?\.txt$', os.path.basename(f))
         if match:
             numbers.append(int(match.group(1)))
     return max(numbers) + 1 if numbers else 1
@@ -571,15 +649,7 @@ def log_user_activity(action, details=""):
         line += f" | details={details}"
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(line + "\n")
-
-def read_user_log(username, max_lines=80):
-    safe_username = re.sub(r"[^A-Za-z0-9_.-]", "_", username) or "unknown"
-    log_file = os.path.join(USER_LOGS_DIR, f"{safe_username}.txt")
-    if not os.path.exists(log_file):
-        return ""
-    with open(log_file, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    return "".join(lines[-max_lines:])
+    append_google_sheet_activity(timestamp, username, name, action, topic, layout, details)
 
 def check_fal_credits(api_key):
     endpoints = [
@@ -631,6 +701,393 @@ def detect_topic_category(topic):
     if any(k in t for k in ["stress","anxiety","tension"]): return "stress"
     if any(k in t for k in ["pain","joint","back","knee"]): return "pain"
     return "general"
+
+SMART_POSES = {
+    "hair": {
+        "problem": [
+            "Checking hairline in mirror with concern",
+            "Running fingers through thinning hair and noticing scalp",
+            "Looking at fallen hair in hand with worried expression",
+            "Seated on bed edge, head slightly down, emotionally low",
+            "Touching crown area while checking hair loss",
+            "Side profile mirror inspection of receding hairline",
+            "Holding comb with visible shed hair, upset expression",
+            "Leaning toward mirror, closely examining scalp",
+            "Hand on forehead, stressed about hair fall",
+            "Pulling hair back gently to inspect widening parting",
+            "Looking down at sink after hair wash, discouraged",
+            "Covering part of hair with insecurity in public-ready pose",
+            "Taking selfie of scalp or hairline to inspect problem",
+            "Slouched seated pose, touching temple area in worry",
+            "Looking away with frustrated expression, hand in hair",
+        ],
+        "solution": [
+            "Consulting doctor with attentive hopeful posture",
+            "Listening carefully during hair treatment consultation",
+            "Applying hair serum carefully at scalp",
+            "Reading hair care routine on phone with focus",
+            "Standing at mirror during treatment routine",
+            "Gently massaging scalp as part of treatment",
+            "Holding dropper bottle, calm and reassured expression",
+            "Brushing hair slowly while checking improvement hopefully",
+            "Self-care routine pose with upright posture",
+            "Looking into mirror with cautious optimism during treatment",
+            "Sitting calmly during guided consultation pose",
+            "Following wellness routine with relaxed confidence",
+            "Preparing treatment step with organized focused posture",
+            "Touching hair softly with early signs of confidence",
+            "Neutral balanced pose showing trust in recovery journey",
+        ],
+        "results": [
+            "Confident smile while touching healthy hair",
+            "Looking in mirror with satisfaction and relief",
+            "Running fingers through hair proudly",
+            "Outdoor confident walking pose with relaxed smile",
+            "Open-shoulder success posture with direct eye contact",
+            "Hair sweep with renewed confidence",
+            "Before-after reveal pose showing transformation pride",
+            "Happy candid smile with visible self-confidence",
+            "Social-ready pose, feeling comfortable in appearance",
+            "Side pose highlighting fuller healthier hair",
+            "Relaxed seated pose with calm proud smile",
+            "Getting ready confidently in front of mirror",
+            "Positive thumbs-up with healthy-hair confidence",
+            "Proud natural smile, lightly adjusting hair",
+            "Radiant relief pose showing restored self-esteem",
+        ],
+    },
+    "skin": {
+        "problem": [
+            "Looking closely into mirror at acne or skin texture with concern",
+            "Touching cheek gently while checking irritated skin",
+            "Side-face inspection pose with worried expression",
+            "Covering part of face with insecurity",
+            "Leaning toward mirror to inspect pimples or rashes",
+            "Looking at phone camera in selfie mode to check skin condition",
+            "Seated tired pose, touching face with frustration",
+            "Hand on chin while noticing breakouts",
+            "Looking away with self-conscious expression about skin",
+            "Close-up inspection pose of forehead or cheek",
+            "Holding face gently with discouraged expression",
+            "Getting ready but pausing due to visible skin concern",
+            "Mirror pose after washing face, noticing irritation",
+            "Low-confidence public-ready pose with skin insecurity",
+            "Reflective pose with visible disappointment about skin flare-up",
+        ],
+        "solution": [
+            "Applying serum carefully during skincare routine",
+            "Gentle face cleansing pose at sink",
+            "Looking at doctor with attentive hopeful posture",
+            "Listening during skincare consultation",
+            "Reading treatment instructions with focus",
+            "Applying cream to affected area carefully",
+            "Standing at mirror with calm self-care posture",
+            "Holding skincare routine product with trust and reassurance",
+            "Checking skin gently while following treatment",
+            "Relaxed consultation pose with improving confidence",
+            "Washing face with disciplined care routine posture",
+            "Balanced upright pose showing commitment to skincare",
+            "Following morning skincare step with calm focus",
+            "Soft smile during routine, feeling hopeful",
+            "Neutral wellness pose reflecting trust in treatment plan",
+        ],
+        "results": [
+            "Confident glowing-skin selfie pose",
+            "Looking in mirror with satisfaction and relief",
+            "Close-up clear-skin confidence pose",
+            "Soft smile with direct eye contact and healthy glow",
+            "Natural radiant pose with relaxed face",
+            "Outdoor confident walk with clear-skin pride",
+            "Light face-touch appreciation pose",
+            "Happy candid smile with visible confidence",
+            "Social-ready confident pose",
+            "Before-after reveal posture showing skin improvement",
+            "Calm radiant side-face pose",
+            "Getting ready happily with renewed confidence",
+            "Proud natural smile highlighting clear skin",
+            "Healthy lifestyle glow pose with relaxed energy",
+            "Bright confident pose showing comfort without insecurity",
+        ],
+    },
+    "pcos": {
+        "problem": [
+            "Seated with low energy, hand on forehead",
+            "Looking into mirror with concern about appearance changes",
+            "Holding lower abdomen gently with discomfort",
+            "Tired sitting pose on bed edge with slouched shoulders",
+            "Looking at irregular-cycle tracker on phone with stress",
+            "Touching face while worried about acne or skin flare-up",
+            "Reflective pose with discouraged expression",
+            "Hand on waist or stomach, feeling bloated and uneasy",
+            "Looking away with emotionally drained posture",
+            "Leaning on table or sink with fatigue",
+            "Checking weight or body changes with concern",
+            "Quiet stressed pose with crossed arms and low confidence",
+            "Sitting with head slightly down, overwhelmed expression",
+            "Looking at self in mirror with frustration and confusion",
+            "Low-mood wellness struggle pose with visible exhaustion",
+        ],
+        "solution": [
+            "Consulting doctor with attentive hopeful posture",
+            "Listening carefully during treatment discussion",
+            "Reading health plan on phone with focus",
+            "Writing or reviewing wellness routine notes",
+            "Drinking water with calm self-care posture",
+            "Light stretching or yoga preparation pose",
+            "Standing upright with ready-to-improve mindset",
+            "Healthy meal planning pose in kitchen",
+            "Taking first-step wellness routine pose",
+            "Calm mirror pose showing gradual hope",
+            "Guided consultation pose with reassured expression",
+            "Walking lightly as part of active recovery routine",
+            "Balanced self-care pose with growing confidence",
+            "Relaxed seated pose while following treatment plan",
+            "Soft hopeful smile showing trust in the process",
+        ],
+        "results": [
+            "Confident smile with healthy balanced energy",
+            "Upright relaxed pose with visible relief",
+            "Looking in mirror with satisfaction and self-acceptance",
+            "Calm radiant pose with restored confidence",
+            "Outdoor walk with light, active, confident body language",
+            "Happy wellness-success pose with direct eye contact",
+            "Comfortable social-ready pose with renewed self-esteem",
+            "Gentle proud smile showing emotional recovery",
+            "Healthy lifestyle pose with relaxed confidence",
+            "Before-after progress reveal pose",
+            "Peaceful yoga-inspired pose with inner balance",
+            "Bright natural smile with stress-free posture",
+            "Energetic achievement pose with open shoulders",
+            "Relaxed candid laugh showing improved well-being",
+            "Quiet confident pose reflecting hormonal-balance progress",
+        ],
+    },
+    "hormonal": {
+        "problem": [
+            "Seated with low energy, hand on forehead",
+            "Looking into mirror with concern about appearance changes",
+            "Holding lower abdomen gently with discomfort",
+            "Tired sitting pose on bed edge with slouched shoulders",
+            "Looking at cycle or symptom tracker on phone with stress",
+            "Touching face while worried about acne or skin flare-up",
+            "Reflective pose with discouraged expression",
+            "Hand on waist or stomach, feeling bloated and uneasy",
+            "Looking away with emotionally drained posture",
+            "Leaning on table or sink with fatigue",
+            "Checking body changes with concern",
+            "Quiet stressed pose with crossed arms and low confidence",
+            "Sitting with head slightly down, overwhelmed expression",
+            "Looking at self in mirror with frustration and confusion",
+            "Low-mood hormonal-health struggle pose with visible exhaustion",
+        ],
+        "solution": [
+            "Consulting doctor with attentive hopeful posture",
+            "Listening carefully during treatment discussion",
+            "Reading health plan on phone with focus",
+            "Writing or reviewing wellness routine notes",
+            "Drinking water with calm self-care posture",
+            "Light stretching or yoga preparation pose",
+            "Standing upright with ready-to-improve mindset",
+            "Healthy meal planning pose in kitchen",
+            "Taking first-step wellness routine pose",
+            "Calm mirror pose showing gradual hope",
+            "Guided consultation pose with reassured expression",
+            "Walking lightly as part of active recovery routine",
+            "Balanced self-care pose with growing confidence",
+            "Relaxed seated pose while following treatment plan",
+            "Soft hopeful smile showing trust in the process",
+        ],
+        "results": [
+            "Confident smile with healthy balanced energy",
+            "Upright relaxed pose with visible relief",
+            "Looking in mirror with satisfaction and self-acceptance",
+            "Calm radiant pose with restored confidence",
+            "Outdoor walk with light, active, confident body language",
+            "Happy wellness-success pose with direct eye contact",
+            "Comfortable social-ready pose with renewed self-esteem",
+            "Gentle proud smile showing emotional recovery",
+            "Healthy lifestyle pose with relaxed confidence",
+            "Before-after progress reveal pose",
+            "Peaceful yoga-inspired pose with inner balance",
+            "Bright natural smile with stress-free posture",
+            "Energetic achievement pose with open shoulders",
+            "Relaxed candid laugh showing improved well-being",
+            "Quiet confident pose reflecting hormonal-balance progress",
+        ],
+    },
+    "weight": {
+        "problem": [
+            "Looking at mirror with concern about body changes",
+            "Measuring waist with disappointed expression",
+            "Sitting tired with slouched shoulders",
+            "Hand on stomach with low-confidence posture",
+            "Looking at old clothes that no longer fit",
+            "Seated on bed edge feeling heavy and discouraged",
+            "Looking down with frustrated expression after checking weight",
+            "Leaning on table with low energy and fatigue",
+            "Reflective pose with crossed arms and body insecurity",
+            "Checking body shape in side profile with concern",
+            "Holding waistband with uncomfortable expression",
+            "Looking at weighing scale with discouragement",
+            "Pausing during daily activity with visible tiredness",
+            "Public-ready but low-confidence pose about body image",
+            "Quiet emotionally drained pose about fitness struggle",
+        ],
+        "solution": [
+            "Talking to doctor or coach with focused posture",
+            "Listening carefully during health consultation",
+            "Measuring waist with hopeful progress mindset",
+            "Preparing healthy meal with commitment",
+            "Drinking water with wellness-focused posture",
+            "Light exercise preparation pose",
+            "Tying shoelaces ready for walk or workout",
+            "Standing upright with ready-to-change attitude",
+            "Tracking progress on phone with cautious optimism",
+            "Active walking pose during recovery journey",
+            "Balanced meal planning pose in kitchen",
+            "Stretching pose with growing confidence",
+            "Checking mirror with disciplined motivation",
+            "Calm lifestyle-routine pose showing commitment",
+            "Soft smile with trust in health-improvement process",
+        ],
+        "results": [
+            "Measuring waist happily with visible progress",
+            "Confident mirror pose with satisfaction",
+            "Walking outdoors with energetic confidence",
+            "Proud smile in better-fitting clothes",
+            "Open-shoulder success posture with direct eye contact",
+            "Light celebratory victory pose",
+            "Before-after transformation reveal posture",
+            "Active lifestyle pose with renewed energy",
+            "Happy candid smile showing improved self-confidence",
+            "Trying on old clothes that fit again with joy",
+            "Relaxed upright pose with healthier body confidence",
+            "Thumbs-up pose showing progress satisfaction",
+            "Healthy strong pose with balanced energy",
+            "Social-confidence pose, ready to go out happily",
+            "Calm proud smile reflecting successful transformation",
+        ],
+    },
+    "pain": {
+        "problem": [
+            "Holding knee with visible discomfort",
+            "Holding lower back while standing in pain",
+            "Seated with shoulder pain and tense expression",
+            "Touching neck with stiffness and discomfort",
+            "Slow standing pose with painful body language",
+            "Leaning on chair or wall for support",
+            "Hand on ankle or foot with strained expression",
+            "Sitting with one hand on painful joint and tired face",
+            "Walking carefully with restricted movement",
+            "Wincing while bending slightly",
+            "Morning stiffness pose while getting up from bed",
+            "Holding wrist or elbow with discomfort",
+            "Side profile showing guarded movement due to pain",
+            "Frustrated pose after failed movement attempt",
+            "Quiet low-energy pose with chronic pain fatigue",
+        ],
+        "solution": [
+            "Consulting doctor with attentive posture",
+            "Listening carefully during pain-treatment discussion",
+            "Guided stretch pose with controlled movement",
+            "Light exercise or rehab preparation posture",
+            "Sitting upright with treatment-focused calmness",
+            "Following physiotherapy-style movement carefully",
+            "Applying care or support to painful area",
+            "Standing balanced with cautious optimism",
+            "Walking slowly but steadily during recovery",
+            "Reading recovery advice with focused expression",
+            "Gentle mobility pose with trust in treatment",
+            "Controlled seated stretch with reassured mindset",
+            "Wellness-routine pose showing commitment to healing",
+            "Neutral posture with reduced stiffness and early hope",
+            "Soft smile during guided recovery process",
+        ],
+        "results": [
+            "Walking comfortably with relief and confidence",
+            "Upright relaxed pose without guarded movement",
+            "Light stretch with freedom and ease",
+            "Smiling naturally after pain relief",
+            "Active daily-life pose with restored mobility",
+            "Open-shoulder relief pose showing comfort",
+            "Before-after progress pose showing better movement",
+            "Confident standing posture with body ease",
+            "Outdoor walk with pain-free body language",
+            "Gentle celebratory success pose",
+            "Relaxed seated pose without discomfort",
+            "Calm proud smile reflecting recovery",
+            "Daily activity pose done comfortably again",
+            "Healthy active posture with restored flexibility",
+            "Radiant relief pose showing improved joint comfort",
+        ],
+    },
+    "stress": {
+        "problem": [
+            "Hand on forehead with stressed expression",
+            "Sitting with head slightly down and mental fatigue",
+            "Looking at phone with overwhelmed face",
+            "Leaning on desk or table with exhaustion",
+            "Eyes closed, tense face, trying to cope",
+            "Holding temples with anxiety or pressure",
+            "Slouched seated pose with low emotional energy",
+            "Looking away with emotionally drained expression",
+            "Restless posture showing inner tension",
+            "Sleepless tired pose on bed edge",
+            "Deep sigh pose with visible burnout",
+            "Arms crossed with discouraged stressed mood",
+            "Reflective low-mood pose with distant gaze",
+            "Quiet overwhelmed pose with hunched shoulders",
+            "Fatigue posture showing mental overload",
+        ],
+        "solution": [
+            "Talking to doctor or therapist with attentive calmness",
+            "Listening carefully during wellness guidance",
+            "Deep breathing pose with slow relaxed posture",
+            "Meditation preparation pose with focus",
+            "Gentle yoga stretch pose",
+            "Drinking water with self-care mindset",
+            "Journaling or planning wellness steps calmly",
+            "Walking lightly with recovery-focused posture",
+            "Looking at phone or notes with hopeful clarity",
+            "Relaxed seated pose during guided care",
+            "Standing upright with emotional reset posture",
+            "Self-care routine pose with calm intention",
+            "Soft smile while practicing healthier habits",
+            "Neutral balanced pose showing trust in recovery",
+            "Quiet hopeful pose with easing mental tension",
+        ],
+        "results": [
+            "Peaceful smile with relaxed shoulders",
+            "Calm meditation-inspired pose",
+            "Outdoor walk with light stress-free body language",
+            "Relaxed seated pose with inner peace",
+            "Gentle candid smile showing emotional balance",
+            "Open posture with visible calm confidence",
+            "Before-after wellness progress pose",
+            "Rested natural expression with ease",
+            "Healthy lifestyle glow pose with relaxed energy",
+            "Social-confidence pose without stress tension",
+            "Bright relief pose showing mental lightness",
+            "Soft side profile with peaceful expression",
+            "Quiet radiant pose with emotional stability",
+            "Happy natural laugh with reduced stress",
+            "Balanced confident posture showing restored wellness",
+        ],
+    },
+}
+
+def normalize_smart_pose_category(category, topic=""):
+    if category == "hormonal" and "pcos" in (topic or "").lower():
+        return "pcos"
+    return category
+
+def get_smart_pose(category, phase, fallback_poses, topic=""):
+    category_key = normalize_smart_pose_category(category, topic)
+    category_map = SMART_POSES.get(category_key, {})
+    poses = category_map.get(phase, [])
+    if poses:
+        return random.choice(poses)
+    return random.choice(fallback_poses)
 
 PLACE_BACKGROUNDS = [
     {"keywords": ["pollution", "smog", "dust", "air quality", "traffic", "commute", "road", "driving"],
@@ -904,7 +1361,7 @@ FEMALE_HAIR_STAGES = {
     },
 }
 
-def build_hair_subject(gender, age_range="30-40", emotion_key="worried", topic=""):
+def build_hair_subject(gender, age_range="30-40", emotion_key="worried", topic="", phase="problem", category="hair"):
     EMOTION_DESC = {
         "worried": "Deeply worried and visibly sad — furrowed brow, heavy tired eyes with dark circles, downward gaze. Jaw slightly tense. Quiet emotional pain. NOT smiling.",
         "hopeful": "Cautiously hopeful — leaning slightly forward, soft expectant smile.",
@@ -928,7 +1385,7 @@ def build_hair_subject(gender, age_range="30-40", emotion_key="worried", topic="
     if gender == "male":
         stage   = MALE_HAIR_STAGES[age_key]
         light   = random.choice(MALE_LIGHTING_MOODS)
-        pose    = random.choice(MALE_POSES)
+        pose    = get_smart_pose(category, phase, MALE_POSES, topic)
         norwood = stage["norwood"]
         clothes = get_male_clothing()
         detected_bg, _ = detect_background(topic)
@@ -952,11 +1409,11 @@ def build_hair_subject(gender, age_range="30-40", emotion_key="worried", topic="
             f"Hands fully visible and anatomically correct. "
             f"Single person only, no products."
         )
-        return subj, f"Male {norwood}", light["label"], pose, "problem", emotion_display
+        return subj, f"Male {norwood}", light["label"], pose, phase, emotion_display
     else:
         stage  = FEMALE_HAIR_STAGES[age_key]
         light  = random.choice(FEMALE_LIGHTING_MOODS)
-        pose   = random.choice(FEMALE_POSES)
+        pose   = get_smart_pose(category, phase, FEMALE_POSES, topic)
         ludwig = stage["ludwig"]
         clothes = get_female_clothing()
         detected_bg, _ = detect_background(topic)
@@ -979,9 +1436,9 @@ def build_hair_subject(gender, age_range="30-40", emotion_key="worried", topic="
             f"Hands fully visible and anatomically correct. "
             f"Single person only, no products."
         )
-        return subj, f"Female {ludwig}", light["label"], pose, "problem", emotion_display
+        return subj, f"Female {ludwig}", light["label"], pose, phase, emotion_display
 
-def build_general_subject(gender, age_range="25-35", emotion_key="natural", topic=""):
+def build_general_subject(gender, age_range="25-35", emotion_key="natural", topic="", phase="problem", category="general"):
     EMOTION_DESC = {
         "worried": "Deeply worried and visibly sad — furrowed brow, heavy tired eyes. NOT smiling.",
         "hopeful": "Cautiously hopeful — leaning slightly forward, soft expectant smile.",
@@ -1001,7 +1458,7 @@ def build_general_subject(gender, age_range="25-35", emotion_key="natural", topi
     emotion_display = EMOTION_OPTIONS.get(emotion_key, "😊 Natural")
 
     if gender == "male":
-        pose    = random.choice(GENERAL_MALE_POSES)
+        pose    = get_smart_pose(category, phase, GENERAL_MALE_POSES, topic)
         light   = random.choice(GENERAL_LIGHTING)
         lbl     = light["label"]
         ldesc   = light["desc"]
@@ -1023,9 +1480,9 @@ def build_general_subject(gender, age_range="25-35", emotion_key="natural", topi
                    f"Face sharp, clear eyes, realistic proportions. "
                    f"Hands fully visible and anatomically correct. "
                    f"Single person only, no products.")
-        return subj, "Standard", lbl, pose, "general", emotion_display
+        return subj, "Standard", lbl, pose, phase, emotion_display
     else:
-        pose    = random.choice(GENERAL_FEMALE_POSES)
+        pose    = get_smart_pose(category, phase, GENERAL_FEMALE_POSES, topic)
         light   = random.choice(GENERAL_LIGHTING)
         lbl     = light["label"]
         ldesc   = light["desc"]
@@ -1047,7 +1504,7 @@ def build_general_subject(gender, age_range="25-35", emotion_key="natural", topi
                    f"Face sharp, clear eyes, realistic proportions. "
                    f"Hands fully visible and anatomically correct. "
                    f"Single person only, no products.")
-        return subj, "Standard", lbl, pose, "general", emotion_display
+        return subj, "Standard", lbl, pose, phase, emotion_display
 
 # ── Skeleton preview ────────────────────────────────────────────────────────────
 def generate_skeleton_preview(layout_id, title, subtext, cta, fmt_key="square"):
@@ -1323,11 +1780,16 @@ def get_layout_id(layout_text):
     return "L01"
 
 def build_base_prompt(style, title, subtext, cta, font, layout,
-                      hair_gender, is_hair, age_range, emotion_key, topic=""):
+                      hair_gender, is_hair, age_range, emotion_key, topic="",
+                      phase="problem", category="general"):
     if hair_gender and is_hair:
-        photography, hl, ll, pl, ph, em = build_hair_subject(hair_gender, age_range, emotion_key, topic)
+        photography, hl, ll, pl, ph, em = build_hair_subject(
+            hair_gender, age_range, emotion_key, topic, phase, category
+        )
     elif hair_gender:
-        photography, hl, ll, pl, ph, em = build_general_subject(hair_gender, age_range, emotion_key, topic)
+        photography, hl, ll, pl, ph, em = build_general_subject(
+            hair_gender, age_range, emotion_key, topic, phase, category
+        )
     else:
         detected_bg, _ = detect_background(topic)
         bg_instruction = detected_bg if detected_bg else "real environment - bathroom, bedroom, home, clinic. Softly blurred."
@@ -1638,6 +2100,8 @@ with main_col:
                 st.session_state.user_age_range,
                 st.session_state.manual_emotion_select,
                 st.session_state.user_topic,
+                st.session_state.manual_phase,
+                st.session_state.manual_category,
             )
             st.session_state.base_prompt = full_prompt
             st.session_state.edited_prompt = full_prompt
@@ -1705,6 +2169,8 @@ with main_col:
                     st.session_state.user_age_range,
                     st.session_state.manual_emotion_select,
                     st.session_state.user_topic,
+                    st.session_state.manual_phase,
+                    st.session_state.manual_category,
                 )
                 st.session_state.base_prompt   = full_prompt
                 st.session_state.edited_prompt = full_prompt
@@ -1762,6 +2228,8 @@ with main_col:
                                 st.session_state.user_age_range,
                                 st.session_state.manual_emotion_select,
                                 st.session_state.user_topic,
+                                st.session_state.manual_phase,
+                                st.session_state.manual_category,
                             )
                             st.session_state.base_prompt     = full_prompt
                             st.session_state.edited_prompt   = full_prompt
@@ -1801,7 +2269,7 @@ with main_col:
             with sk2:
                 st.caption("Story 9:16 — 1080×1920")
                 st.image(st.session_state.skeleton_story, width=135)
-            if st.session_state.hair_label:
+            if False:
                 ph = st.session_state.ad_phase or ""
                 ph_badge = (f'<span class="badge badge-{ph}">{ph.capitalize()}</span>'
                             if ph in ["problem","solution","results"] else ph)
@@ -2016,7 +2484,7 @@ with right_col:
     else:
         st.info("⚡ Add fal.ai API key in sidebar to enable image generation")
 
-    # ── Generation History (Last 5) ───────────────────────────────────────────
+    # ── Generation History (Last 3) ───────────────────────────────────────────
     st.markdown("""
     <div style='font-size:11px;font-weight:600;color:#64748b;
     text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;margin-top:12px;'>
@@ -2024,7 +2492,7 @@ with right_col:
     """, unsafe_allow_html=True)
     
     if st.session_state.generation_history:
-        for item in st.session_state.generation_history[:5]:
+        for item in st.session_state.generation_history[:3]:
             st.markdown(f"""
             <div class="history-item">
               <b>#{item['id']}</b> · {item['timestamp']}<br>
@@ -2034,38 +2502,6 @@ with right_col:
             """, unsafe_allow_html=True)
     else:
         st.caption("No generations yet. Generate your first ad!")
-
-    st.markdown("""
-    <div style='font-size:11px;font-weight:600;color:#64748b;
-    text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;margin-top:12px;'>
-    Admin View Logs</div>
-    """, unsafe_allow_html=True)
-
-    log_usernames = sorted(AUTH_CREDENTIALS["usernames"].keys())
-    selected_log_user = st.selectbox(
-        "Select user log",
-        log_usernames,
-        key="admin_log_user",
-        label_visibility="collapsed",
-    )
-    log_line_count = st.selectbox(
-        "Lines",
-        [20, 50, 100, 200],
-        index=1,
-        key="admin_log_lines",
-        label_visibility="collapsed",
-    )
-    log_content = read_user_log(selected_log_user, max_lines=log_line_count)
-    if log_content.strip():
-        st.text_area(
-            "User activity log",
-            value=log_content,
-            height=180,
-            key="admin_log_viewer",
-            label_visibility="collapsed",
-        )
-    else:
-        st.caption("No activity logged yet for this user.")
 
     # ── Character details ─────────────────────────────────────────────────────
     if st.session_state.hair_label:
@@ -2200,6 +2636,12 @@ with st.sidebar:
         st.session_state.fal_credits = None  # Reset cache when key changes
     elif fk:
         st.session_state.fal_key = fk
+
+    google_sheet_ready = get_google_activity_sheet() is not None
+    if google_sheet_ready:
+        st.success("Google Sheets tracking connected")
+    else:
+        st.caption("Google Sheets tracking not connected")
 
     st.markdown("---")
     st.markdown("### 📊 Status")
