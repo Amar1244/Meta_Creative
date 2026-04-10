@@ -1783,7 +1783,11 @@ def stamp_logo(img):
     try:
         if not os.path.exists(LOGO_PATH): return img
         logo = Image.open(LOGO_PATH).convert("RGBA")
-        logo = logo.resize((140,70), Image.LANCZOS)
+        # Downsample in steps for better quality from large source
+        target_w, target_h = 280, 140
+        while logo.width > target_w * 2:
+            logo = logo.resize((logo.width // 2, logo.height // 2), Image.LANCZOS)
+        logo = logo.resize((target_w, target_h), Image.LANCZOS)
         if img.mode != "RGBA": img = img.convert("RGBA")
         img.paste(logo, (img.width-logo.width-20, 20), logo)
     except Exception: pass
